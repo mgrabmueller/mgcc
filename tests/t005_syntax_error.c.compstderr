@@ -1,0 +1,7 @@
+tests/t005_syntax_error.c: In function ‘main’:
+tests/t005_syntax_error.c:6:32: error: expected ‘;’ before ‘return’
+    6 |     printf("hello from t005\n")
+      |                                ^
+      |                                ;
+    7 |     return 0;
+      |     ~~~~~~                      
