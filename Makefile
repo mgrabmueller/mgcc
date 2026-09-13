@@ -3,7 +3,7 @@ CFLAGS  := -std=c11 -Wall -Wextra -O2 -g
 LDFLAGS :=
 LDLIBS  :=
 
-SRC     := main.c arena.c
+SRC     := main.c arena.c token.c
 OBJ     := $(SRC:.c=.o)
 BIN     := mgcc
 

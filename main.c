@@ -10,6 +10,7 @@
 #include <sys/wait.h>
 
 #include "arena.h"
+#include "token.h"
 
 #define PROG_NAME "mgcc"
 #define PROG_VERSION "0.3.0"
@@ -26,6 +27,7 @@ struct options {
     enum stop_phase stop;
     const char *output;
     const char *input;
+    int dump_tokens;
     char include_dirs[MAX_ARGS][256];
     int n_include_dirs;
     char lib_dirs[MAX_ARGS][256];
@@ -54,6 +56,7 @@ static void print_help(void)
     printf("  -I<dir>           Add <dir> to the end of the main include path\n");
     printf("  -L<dir>           Add <dir> to the end of the library search path\n");
     printf("  -l<lib>           Link against library <lib>\n");
+    printf("  --dump-tokens     Tokenize preprocessed input and print tokens\n");
 }
 
 static char *g_tmpfiles[MAX_ARGS];
@@ -105,6 +108,7 @@ static void parse_args(int argc, char **argv, struct options *opt)
     opt->stop = STOP_LINK;
     opt->output = NULL;
     opt->input = NULL;
+    opt->dump_tokens = 0;
     opt->n_include_dirs = 0;
     opt->n_lib_dirs = 0;
     opt->n_libs = 0;
@@ -118,6 +122,10 @@ static void parse_args(int argc, char **argv, struct options *opt)
         if (strcmp(arg, "--version") == 0) {
             print_version();
             exit(0);
+        }
+        if (strcmp(arg, "--dump-tokens") == 0) {
+            opt->dump_tokens = 1;
+            continue;
         }
         if (strcmp(arg, "-S") == 0) {
             opt->stop = STOP_COMPILE;
@@ -300,6 +308,64 @@ static void link_objs(const char *input, const char *output,
     run_gcc(argv);
 }
 
+static char *read_file_into_arena(struct arena *a, const char *path,
+                                     size_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        die("cannot open '%s'", path);
+    if (fseek(f, 0, SEEK_END) != 0)
+        die("seek failed on '%s'", path);
+    long sz = ftell(f);
+    if (sz < 0)
+        die("tell failed on '%s'", path);
+    rewind(f);
+    char *buf = arena_alloc(a, (size_t)sz + 1);
+    if (sz > 0 && fread(buf, 1, (size_t)sz, f) != (size_t)sz)
+        die("short read on '%s'", path);
+    buf[sz] = '\0';
+    fclose(f);
+    *out_len = (size_t)sz;
+    return buf;
+}
+
+static const char *tok_kind_name(enum token_kind k)
+{
+    switch (k) {
+    case TOK_EOF:    return "EOF";
+    case TOK_IDENT:  return "ident";
+    case TOK_NUMBER: return "number";
+    case TOK_STRING: return "string";
+    case TOK_CHAR:   return "char";
+    case TOK_PUNCT:  return "punct";
+    case TOK_OTHER:  return "other";
+    }
+    return "?";
+}
+
+static void dump_tokens(struct arena *a, const char *pp_file)
+{
+    size_t len;
+    char *data = read_file_into_arena(a, pp_file, &len);
+    struct token_list *tl = tokenize(a, data, len);
+    for (struct token *t = tl->head; t; t = t->next) {
+        printf("%s:%d:%d  %-7s  off=%zu  len=%zu  '",
+               t->loc.filename ? t->loc.filename : "?",
+               t->loc.line, t->loc.col,
+               tok_kind_name(t->kind), t->offset, t->len);
+        for (size_t i = 0; i < t->len; i++) {
+            char ch = t->text[i];
+            if (ch == '\n')
+                fputs("\\n", stdout);
+            else if (ch == '\t')
+                fputs("\\t", stdout);
+            else
+                putchar(ch);
+        }
+        printf("'\n");
+    }
+}
+
 int main(int argc, char **argv)
 {
     atexit(cleanup_tmpfiles);
@@ -309,6 +375,11 @@ int main(int argc, char **argv)
 
     char *pp_tmp = mktmp(".pp");
     preprocess(opt.input, pp_tmp, &opt);
+
+    if (opt.dump_tokens) {
+        dump_tokens(&g_arena, pp_tmp);
+        return 0;
+    }
     arena_reset(&g_arena);
 
     if (opt.stop == STOP_COMPILE) {
