@@ -1,9 +1,35 @@
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #define PROG_NAME "mgcc"
-#define PROG_VERSION "0.1.0"
+#define PROG_VERSION "0.2.0"
+
+#define MAX_ARGS 256
+
+enum stop_phase {
+    STOP_LINK = 0,
+    STOP_ASSEMBLE = 1,
+    STOP_COMPILE = 2,
+};
+
+struct options {
+    enum stop_phase stop;
+    const char *output;
+    const char *input;
+    char include_dirs[MAX_ARGS][256];
+    int n_include_dirs;
+    char lib_dirs[MAX_ARGS][256];
+    int n_lib_dirs;
+    char libs[MAX_ARGS][256];
+    int n_libs;
+};
 
 static void print_version(void)
 {
@@ -13,7 +39,7 @@ static void print_version(void)
 
 static void print_help(void)
 {
-    printf("Usage: %s [options] file...\n", PROG_NAME);
+    printf("Usage: %s [options] file\n", PROG_NAME);
     printf("Options:\n");
     printf("  --help            Display this information\n");
     printf("  --version         Display compiler version information\n");
@@ -25,116 +51,283 @@ static void print_help(void)
     printf("  -l<lib>           Link against library <lib>\n");
 }
 
-static const char *not_impl = "mgcc: not yet implemented";
+static char *g_tmpfiles[MAX_ARGS];
+static int g_n_tmpfiles = 0;
 
-static void handle_compile_only(void)
+static void die(const char *fmt, ...);
+
+static void cleanup_tmpfiles(void)
 {
-    printf("%s: -S (compile to assembly)\n", not_impl);
-}
-
-static void handle_compile_assemble(void)
-{
-    printf("%s: -c (compile to object file)\n", not_impl);
-}
-
-static void handle_link(void)
-{
-    printf("%s: full link step\n", not_impl);
-}
-
-static void handle_include_dir(const char *dir)
-{
-    printf("%s: add include directory '%s'\n", not_impl, dir);
-}
-
-static void handle_lib_dir(const char *dir)
-{
-    printf("%s: add library directory '%s'\n", not_impl, dir);
-}
-
-static void handle_library(const char *lib)
-{
-    printf("%s: link library '%s'\n", not_impl, lib);
-}
-
-static void handle_output(const char *file)
-{
-    printf("%s: output file '%s'\n", not_impl, file);
-}
-
-static int parse_option(const char *arg, int *idx, int argc, char **argv)
-{
-    if (strcmp(arg, "--help") == 0) {
-        print_help();
-        exit(0);
-    }
-    if (strcmp(arg, "--version") == 0) {
-        print_version();
-        exit(0);
-    }
-    if (arg[0] != '-' || arg[1] == '\0')
-        return 0;
-
-    if (arg[1] == 'I') {
-        handle_include_dir(arg + 2);
-        return 1;
-    }
-    if (arg[1] == 'L') {
-        handle_lib_dir(arg + 2);
-        return 1;
-    }
-    if (arg[1] == 'l') {
-        handle_library(arg + 2);
-        return 1;
-    }
-    if (arg[1] == 'o' && arg[2] == '\0') {
-        if (*idx + 1 >= argc) {
-            fprintf(stderr, "%s: option '-o' requires an argument\n", PROG_NAME);
-            exit(2);
+    for (int i = 0; i < g_n_tmpfiles; i++) {
+        if (g_tmpfiles[i]) {
+            unlink(g_tmpfiles[i]);
+            free(g_tmpfiles[i]);
+            g_tmpfiles[i] = NULL;
         }
-        handle_output(argv[++(*idx)]);
-        return 1;
     }
-    if (arg[1] == 'S' && arg[2] == '\0') {
-        handle_compile_only();
-        return 1;
-    }
-    if (arg[1] == 'c' && arg[2] == '\0') {
-        handle_compile_assemble();
-        return 1;
+}
+
+static void track_tmp(char *path)
+{
+    if (g_n_tmpfiles >= MAX_ARGS)
+        die("too many temp files");
+    g_tmpfiles[g_n_tmpfiles++] = path;
+}
+
+static void die(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "%s: ", PROG_NAME);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    exit(1);
+}
+
+static void add_string(char arr[MAX_ARGS][256], int *n, const char *s)
+{
+    if (*n >= MAX_ARGS)
+        die("too many arguments");
+    strncpy(arr[*n], s, 255);
+    arr[*n][255] = '\0';
+    (*n)++;
+}
+
+static void parse_args(int argc, char **argv, struct options *opt)
+{
+    opt->stop = STOP_LINK;
+    opt->output = NULL;
+    opt->input = NULL;
+    opt->n_include_dirs = 0;
+    opt->n_lib_dirs = 0;
+    opt->n_libs = 0;
+
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (strcmp(arg, "--help") == 0) {
+            print_help();
+            exit(0);
+        }
+        if (strcmp(arg, "--version") == 0) {
+            print_version();
+            exit(0);
+        }
+        if (strcmp(arg, "-S") == 0) {
+            opt->stop = STOP_COMPILE;
+            continue;
+        }
+        if (strcmp(arg, "-c") == 0) {
+            opt->stop = STOP_ASSEMBLE;
+            continue;
+        }
+        if (strcmp(arg, "-o") == 0) {
+            if (i + 1 >= argc)
+                die("option '-o' requires an argument");
+            opt->output = argv[++i];
+            continue;
+        }
+        if (arg[0] == '-' && arg[1] == 'I') {
+            add_string(opt->include_dirs, &opt->n_include_dirs, arg + 2);
+            continue;
+        }
+        if (arg[0] == '-' && arg[1] == 'L') {
+            add_string(opt->lib_dirs, &opt->n_lib_dirs, arg + 2);
+            continue;
+        }
+        if (arg[0] == '-' && arg[1] == 'l') {
+            add_string(opt->libs, &opt->n_libs, arg + 2);
+            continue;
+        }
+        if (arg[0] == '-' && arg[1] != '\0')
+            die("unrecognized option '%s'", arg);
+        if (opt->input != NULL)
+            die("only one input file is supported (got '%s' and '%s')",
+                opt->input, arg);
+        opt->input = arg;
     }
 
-    fprintf(stderr, "%s: unrecognized option '%s'\n", PROG_NAME, arg);
-    return -1;
+    if (opt->input == NULL)
+        die("no input file");
+}
+
+static void add_include_args(char *argv[MAX_ARGS], int *n,
+                             struct options *opt)
+{
+    for (int i = 0; i < opt->n_include_dirs; i++) {
+        char buf[264];
+        snprintf(buf, sizeof(buf), "-I%s", opt->include_dirs[i]);
+        argv[(*n)++] = strdup(buf);
+    }
+}
+
+static void add_lib_args(char *argv[MAX_ARGS], int *n, struct options *opt)
+{
+    for (int i = 0; i < opt->n_lib_dirs; i++) {
+        char buf[264];
+        snprintf(buf, sizeof(buf), "-L%s", opt->lib_dirs[i]);
+        argv[(*n)++] = strdup(buf);
+    }
+    for (int i = 0; i < opt->n_libs; i++) {
+        char buf[264];
+        snprintf(buf, sizeof(buf), "-l%s", opt->libs[i]);
+        argv[(*n)++] = strdup(buf);
+    }
+}
+
+static void run_gcc(char *argv[MAX_ARGS])
+{
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0)
+        die("fork failed");
+    if (pid == 0) {
+        execvp("gcc", argv);
+        _exit(127);
+    }
+    int status;
+    if (waitpid(pid, &status, 0) < 0)
+        die("waitpid failed");
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        exit(WIFEXITED(status) ? WEXITSTATUS(status) : 1);
+}
+
+static char *replace_ext(const char *path, const char *newext)
+{
+    const char *dot = strrchr(path, '.');
+    const char *slash = strrchr(path, '/');
+    size_t baselen = dot && (!slash || dot > slash) ? (size_t)(dot - path) : strlen(path);
+    char *out = malloc(baselen + strlen(newext) + 1);
+    if (!out)
+        die("out of memory");
+    memcpy(out, path, baselen);
+    strcpy(out + baselen, newext);
+    return out;
+}
+
+static char *default_output(const char *input, enum stop_phase stop)
+{
+    switch (stop) {
+    case STOP_COMPILE:  return replace_ext(input, ".s");
+    case STOP_ASSEMBLE: return replace_ext(input, ".o");
+    case STOP_LINK:     return strdup("a.out");
+    }
+    return NULL;
+}
+
+static char *mktmp(const char *suffix)
+{
+    char tmpl[] = "/tmp/mgcc_XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0)
+        die("mkstemp failed");
+    close(fd);
+    char *out = malloc(strlen(tmpl) + strlen(suffix) + 1);
+    if (!out)
+        die("out of memory");
+    sprintf(out, "%s%s", tmpl, suffix);
+    unlink(tmpl);
+    track_tmp(out);
+    return out;
+}
+
+static void preprocess(const char *input, const char *output,
+                       struct options *opt)
+{
+    char *argv[MAX_ARGS];
+    int n = 0;
+    argv[n++] = "gcc";
+    argv[n++] = "-E";
+    argv[n++] = "-o";
+    argv[n++] = (char *)output;
+    add_include_args(argv, &n, opt);
+    argv[n++] = (char *)input;
+    argv[n] = NULL;
+    run_gcc(argv);
+}
+
+static void compile(const char *input, const char *output,
+                    struct options *opt)
+{
+    (void)opt;
+    char *argv[MAX_ARGS];
+    int n = 0;
+    argv[n++] = "gcc";
+    argv[n++] = "-S";
+    argv[n++] = "-x";
+    argv[n++] = "cpp-output";
+    argv[n++] = "-o";
+    argv[n++] = (char *)output;
+    argv[n++] = (char *)input;
+    argv[n] = NULL;
+    run_gcc(argv);
+}
+
+static void assemble(const char *input, const char *output,
+                     struct options *opt)
+{
+    (void)opt;
+    char *argv[MAX_ARGS];
+    int n = 0;
+    argv[n++] = "gcc";
+    argv[n++] = "-c";
+    argv[n++] = "-x";
+    argv[n++] = "assembler";
+    argv[n++] = "-o";
+    argv[n++] = (char *)output;
+    argv[n++] = (char *)input;
+    argv[n] = NULL;
+    run_gcc(argv);
+}
+
+static void link_objs(const char *input, const char *output,
+                      struct options *opt)
+{
+    char *argv[MAX_ARGS];
+    int n = 0;
+    argv[n++] = "gcc";
+    argv[n++] = "-o";
+    argv[n++] = (char *)output;
+    argv[n++] = (char *)input;
+    add_lib_args(argv, &n, opt);
+    argv[n] = NULL;
+    run_gcc(argv);
 }
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) {
-        print_help();
+    atexit(cleanup_tmpfiles);
+    struct options opt;
+    parse_args(argc, argv, &opt);
+
+    char *pp_tmp = mktmp(".pp");
+    preprocess(opt.input, pp_tmp, &opt);
+
+    if (opt.stop == STOP_COMPILE) {
+        char *out = opt.output ? strdup(opt.output)
+                               : default_output(opt.input, STOP_COMPILE);
+        compile(pp_tmp, out, &opt);
+        free(out);
         return 0;
     }
 
-    int saw_action = 0;
-    int saw_source = 0;
-    int status = 0;
+    char *s_tmp = mktmp(".s");
+    compile(pp_tmp, s_tmp, &opt);
 
-    for (int i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-        int r = parse_option(arg, &i, argc, argv);
-        if (r < 0) {
-            status = 1;
-        } else if (r == 1) {
-            if (strcmp(arg, "-S") == 0 || strcmp(arg, "-c") == 0)
-                saw_action = 1;
-        } else {
-            saw_source = 1;
-            printf("%s: compile source '%s'\n", not_impl, arg);
-        }
+    if (opt.stop == STOP_ASSEMBLE) {
+        char *out = opt.output ? strdup(opt.output)
+                               : default_output(opt.input, STOP_ASSEMBLE);
+        assemble(s_tmp, out, &opt);
+        free(out);
+        return 0;
     }
 
-    if (status == 0 && saw_source && !saw_action)
-        handle_link();
+    char *o_tmp = mktmp(".o");
+    assemble(s_tmp, o_tmp, &opt);
 
-    return status;
+    char *out = opt.output ? strdup(opt.output)
+                           : default_output(opt.input, STOP_LINK);
+    link_objs(o_tmp, out, &opt);
+    free(out);
+    return 0;
 }
