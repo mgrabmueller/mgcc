@@ -5,11 +5,14 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <unistd.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#include "arena.h"
+
 #define PROG_NAME "mgcc"
-#define PROG_VERSION "0.2.0"
+#define PROG_VERSION "0.3.0"
 
 #define MAX_ARGS 256
 
@@ -30,6 +33,8 @@ struct options {
     char libs[MAX_ARGS][256];
     int n_libs;
 };
+
+static struct arena g_arena;
 
 static void print_version(void)
 {
@@ -54,8 +59,6 @@ static void print_help(void)
 static char *g_tmpfiles[MAX_ARGS];
 static int g_n_tmpfiles = 0;
 
-static void die(const char *fmt, ...);
-
 static void cleanup_tmpfiles(void)
 {
     for (int i = 0; i < g_n_tmpfiles; i++) {
@@ -65,7 +68,10 @@ static void cleanup_tmpfiles(void)
             g_tmpfiles[i] = NULL;
         }
     }
+    arena_free(&g_arena);
 }
+
+static void die(const char *fmt, ...);
 
 static void track_tmp(char *path)
 {
@@ -157,7 +163,7 @@ static void add_include_args(char *argv[MAX_ARGS], int *n,
     for (int i = 0; i < opt->n_include_dirs; i++) {
         char buf[264];
         snprintf(buf, sizeof(buf), "-I%s", opt->include_dirs[i]);
-        argv[(*n)++] = strdup(buf);
+        argv[(*n)++] = arena_strdup(&g_arena, buf);
     }
 }
 
@@ -166,12 +172,12 @@ static void add_lib_args(char *argv[MAX_ARGS], int *n, struct options *opt)
     for (int i = 0; i < opt->n_lib_dirs; i++) {
         char buf[264];
         snprintf(buf, sizeof(buf), "-L%s", opt->lib_dirs[i]);
-        argv[(*n)++] = strdup(buf);
+        argv[(*n)++] = arena_strdup(&g_arena, buf);
     }
     for (int i = 0; i < opt->n_libs; i++) {
         char buf[264];
         snprintf(buf, sizeof(buf), "-l%s", opt->libs[i]);
-        argv[(*n)++] = strdup(buf);
+        argv[(*n)++] = arena_strdup(&g_arena, buf);
     }
 }
 
@@ -297,37 +303,44 @@ static void link_objs(const char *input, const char *output,
 int main(int argc, char **argv)
 {
     atexit(cleanup_tmpfiles);
+    arena_init(&g_arena, ARENA_DEFAULT_BLOCK);
     struct options opt;
     parse_args(argc, argv, &opt);
 
     char *pp_tmp = mktmp(".pp");
     preprocess(opt.input, pp_tmp, &opt);
+    arena_reset(&g_arena);
 
     if (opt.stop == STOP_COMPILE) {
         char *out = opt.output ? strdup(opt.output)
                                : default_output(opt.input, STOP_COMPILE);
         compile(pp_tmp, out, &opt);
+        arena_reset(&g_arena);
         free(out);
         return 0;
     }
 
     char *s_tmp = mktmp(".s");
     compile(pp_tmp, s_tmp, &opt);
+    arena_reset(&g_arena);
 
     if (opt.stop == STOP_ASSEMBLE) {
         char *out = opt.output ? strdup(opt.output)
                                : default_output(opt.input, STOP_ASSEMBLE);
         assemble(s_tmp, out, &opt);
+        arena_reset(&g_arena);
         free(out);
         return 0;
     }
 
     char *o_tmp = mktmp(".o");
     assemble(s_tmp, o_tmp, &opt);
+    arena_reset(&g_arena);
 
     char *out = opt.output ? strdup(opt.output)
                            : default_output(opt.input, STOP_LINK);
     link_objs(o_tmp, out, &opt);
+    arena_reset(&g_arena);
     free(out);
     return 0;
 }
