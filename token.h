@@ -20,7 +20,6 @@ struct token {
     enum token_kind kind;
     const char *text;
     size_t len;
-    size_t offset;
     struct source_loc loc;
 };
 

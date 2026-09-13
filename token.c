@@ -7,14 +7,13 @@
 
 static void tl_append(struct arena *a, struct token_list *tl,
                       enum token_kind kind, const char *text, size_t len,
-                      size_t offset, struct source_loc loc)
+                      struct source_loc loc)
 {
     struct token *t = arena_alloc(a, sizeof(*t));
     t->next = NULL;
     t->kind = kind;
     t->text = text;
     t->len = len;
-    t->offset = offset;
     t->loc = loc;
     if (tl->tail)
         tl->tail->next = t;
@@ -33,13 +32,12 @@ static int is_ident_cont(int c)
     return isalnum(c) || c == '_' || c == '$';
 }
 
-static void skip_line(const char **p, size_t *offset, int *col,
-                      const char *end, int *line)
+static void skip_line(const char **p, int *col, const char *end)
 {
     while (*p < end && **p != '\n') {
-        (*p)++; (*offset)++; (*col)++;
+        (*p)++;
+        (*col)++;
     }
-    (void)line;
 }
 
 struct token_list *tokenize(struct arena *a, const char *data, size_t len)
@@ -52,7 +50,6 @@ struct token_list *tokenize(struct arena *a, const char *data, size_t len)
     int col = 1;
     const char *p = data;
     const char *end = data + len;
-    size_t offset = 0;
 
     while (p < end) {
         unsigned char c = (unsigned char)*p;
@@ -61,25 +58,22 @@ struct token_list *tokenize(struct arena *a, const char *data, size_t len)
             cur.line++;
             col = 1;
             p++;
-            offset++;
             continue;
         }
 
         if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') {
             col++;
             p++;
-            offset++;
             continue;
         }
 
         if (c == '/' && p + 1 < end && p[1] == '/') {
-            skip_line(&p, &offset, &col, end, &cur.line);
+            skip_line(&p, &col, end);
             continue;
         }
 
         if (c == '/' && p + 1 < end && p[1] == '*') {
             p += 2;
-            offset += 2;
             col += 2;
             while (p + 1 < end && !(p[0] == '*' && p[1] == '/')) {
                 if (*p == '\n') {
@@ -89,11 +83,9 @@ struct token_list *tokenize(struct arena *a, const char *data, size_t len)
                     col++;
                 }
                 p++;
-                offset++;
             }
             if (p + 1 < end) {
                 p += 2;
-                offset += 2;
                 col += 2;
             }
             continue;
@@ -101,137 +93,131 @@ struct token_list *tokenize(struct arena *a, const char *data, size_t len)
 
         if (c == '#' && (p == data || p[-1] == '\n')) {
             p++;
-            offset++;
             col++;
             while (p < end && (*p == ' ' || *p == '\t')) {
-                p++; offset++; col++;
+                p++; col++;
             }
             if (p < end && isdigit((unsigned char)*p)) {
                 int lnum = 0;
                 while (p < end && isdigit((unsigned char)*p)) {
                     lnum = lnum * 10 + (*p - '0');
-                    p++; offset++; col++;
+                    p++; col++;
                 }
                 while (p < end && (*p == ' ' || *p == '\t')) {
-                    p++; offset++; col++;
+                    p++; col++;
                 }
                 if (p < end && *p == '"') {
                     char fname[1024];
                     size_t flen = 0;
-                    p++; offset++; col++;
+                    p++; col++;
                     while (p < end && *p != '"' && flen < sizeof(fname) - 1) {
                         fname[flen++] = *p;
-                        p++; offset++; col++;
+                        p++; col++;
                     }
                     fname[flen] = '\0';
                     if (p < end && *p == '"') {
-                        p++; offset++; col++;
+                        p++; col++;
                     }
                     cur.filename = arena_strdup(a, fname);
                     cur.line = lnum;
                     col = 1;
                 }
-                skip_line(&p, &offset, &col, end, &cur.line);
+                skip_line(&p, &col, end);
                 continue;
             }
-            skip_line(&p, &offset, &col, end, &cur.line);
+            skip_line(&p, &col, end);
             continue;
         }
 
         if (c == '"') {
             const char *start = p;
-            size_t soff = offset;
             int sc = col;
-            p++; offset++; col++;
+            p++; col++;
             while (p < end && *p != '"') {
                 if (*p == '\\' && p + 1 < end) {
-                    p++; offset++; col++;
-                    if (p < end) { p++; offset++; col++; }
+                    p++; col++;
+                    if (p < end) { p++; col++; }
                 } else {
-                    p++; offset++; col++;
+                    p++; col++;
                 }
             }
-            if (p < end) { p++; offset++; col++; }
+            if (p < end) { p++; col++; }
             struct source_loc loc = cur;
             loc.col = sc;
-            tl_append(a, tl, TOK_STRING, start, (size_t)(p - start), soff, loc);
+            tl_append(a, tl, TOK_STRING, start, (size_t)(p - start), loc);
             continue;
         }
 
         if (c == '\'') {
             const char *start = p;
-            size_t soff = offset;
             int sc = col;
-            p++; offset++; col++;
+            p++; col++;
             while (p < end && *p != '\'') {
                 if (*p == '\\' && p + 1 < end) {
-                    p++; offset++; col++;
-                    if (p < end) { p++; offset++; col++; }
+                    p++; col++;
+                    if (p < end) { p++; col++; }
                 } else {
-                    p++; offset++; col++;
+                    p++; col++;
                 }
             }
-            if (p < end) { p++; offset++; col++; }
+            if (p < end) { p++; col++; }
             struct source_loc loc = cur;
             loc.col = sc;
-            tl_append(a, tl, TOK_CHAR, start, (size_t)(p - start), soff, loc);
+            tl_append(a, tl, TOK_CHAR, start, (size_t)(p - start), loc);
             continue;
         }
 
         if (is_ident_start(c)) {
             const char *start = p;
-            size_t soff = offset;
             int sc = col;
             while (p < end && is_ident_cont((unsigned char)*p)) {
-                p++; offset++; col++;
+                p++; col++;
             }
             struct source_loc loc = cur;
             loc.col = sc;
-            tl_append(a, tl, TOK_IDENT, start, (size_t)(p - start), soff, loc);
+            tl_append(a, tl, TOK_IDENT, start, (size_t)(p - start), loc);
             continue;
         }
 
         if (isdigit(c) || (c == '.' && p + 1 < end && isdigit((unsigned char)p[1]))) {
             const char *start = p;
-            size_t soff = offset;
             int sc = col;
             int saw_e = 0;
             while (p < end) {
                 unsigned char ch = (unsigned char)*p;
                 if (isalnum(ch) || ch == '.') {
                     if (ch == 'e' || ch == 'E') saw_e = 1;
-                    p++; offset++; col++;
+                    p++; col++;
                 } else if (saw_e && (ch == '+' || ch == '-')) {
                     saw_e = 0;
-                    p++; offset++; col++;
+                    p++; col++;
                 } else if (ch == '\'' && p > start && isalnum((unsigned char)p[-1])) {
-                    p++; offset++; col++;
+                    p++; col++;
                 } else {
                     break;
                 }
             }
             struct source_loc loc = cur;
             loc.col = sc;
-            tl_append(a, tl, TOK_NUMBER, start, (size_t)(p - start), soff, loc);
+            tl_append(a, tl, TOK_NUMBER, start, (size_t)(p - start), loc);
             continue;
         }
 
         if (ispunct(c)) {
             const char *start = p;
-            size_t soff = offset;
             int sc = col;
             if (p + 2 < end && p[0] == '.' && p[1] == '.' && p[2] == '.') {
-                p += 3; offset += 3; col += 3;
+                p += 3; col += 3;
                 struct source_loc loc = cur; loc.col = sc;
-                tl_append(a, tl, TOK_PUNCT, start, 3, soff, loc);
+                tl_append(a, tl, TOK_PUNCT, start, 3, loc);
                 continue;
             }
             if (p + 2 < end &&
                 ((p[0] == '<' && p[1] == '<' && p[2] == '=') ||
                  (p[0] == '>' && p[1] == '>' && p[2] == '='))) {
-                p += 3; offset += 3; col += 3;
+                p += 3; col += 3;
                 struct source_loc loc = cur; loc.col = sc;
-                tl_append(a, tl, TOK_PUNCT, start, 3, soff, loc);
+                tl_append(a, tl, TOK_PUNCT, start, 3, loc);
                 continue;
             }
             if (p + 1 < end) {
@@ -252,27 +238,26 @@ struct token_list *tokenize(struct arena *a, const char *data, size_t len)
                     }
                 }
                 if (is_two) {
-                    p += 2; offset += 2; col += 2;
+                    p += 2; col += 2;
                     struct source_loc loc = cur; loc.col = sc;
-                    tl_append(a, tl, TOK_PUNCT, start, 2, soff, loc);
+                    tl_append(a, tl, TOK_PUNCT, start, 2, loc);
                     continue;
                 }
             }
-            p++; offset++; col++;
+            p++; col++;
             {
                 struct source_loc loc = cur; loc.col = sc;
-                tl_append(a, tl, TOK_PUNCT, start, 1, soff, loc);
+                tl_append(a, tl, TOK_PUNCT, start, 1, loc);
             }
             continue;
         }
 
         {
             const char *start = p;
-            size_t soff = offset;
             int sc = col;
-            p++; offset++; col++;
+            p++; col++;
             struct source_loc loc = cur; loc.col = sc;
-            tl_append(a, tl, TOK_OTHER, start, 1, soff, loc);
+            tl_append(a, tl, TOK_OTHER, start, 1, loc);
         }
     }
 

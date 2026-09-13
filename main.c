@@ -349,10 +349,10 @@ static void dump_tokens(struct arena *a, const char *pp_file)
     char *data = read_file_into_arena(a, pp_file, &len);
     struct token_list *tl = tokenize(a, data, len);
     for (struct token *t = tl->head; t; t = t->next) {
-        printf("%s:%d:%d  %-7s  off=%zu  len=%zu  '",
+        printf("%s:%d:%d  %-7s  len=%zu  '",
                t->loc.filename ? t->loc.filename : "?",
                t->loc.line, t->loc.col,
-               tok_kind_name(t->kind), t->offset, t->len);
+               tok_kind_name(t->kind), t->len);
         for (size_t i = 0; i < t->len; i++) {
             char ch = t->text[i];
             if (ch == '\n')
