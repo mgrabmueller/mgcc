@@ -11,6 +11,12 @@
 #     the test is not run (a missing executable is not an error).
 #   - If the file is absent, the compiler is expected to succeed (exit 0)
 #     and the resulting executable must run and exit 0.
+#
+# Optional companion file <src.c>.compstderr:
+#   Reference for the compiler's stderr output. After compilation, the
+#   actual stderr is compared to this file (exact match). On mismatch the
+#   test FAILs and the diff is shown. If the file is absent, stderr is not
+#   checked (same behaviour as before).
 set -u
 
 MGCC=${MGCC:-./mgcc}
@@ -27,6 +33,7 @@ fi
 name=$(basename "$src" .c)
 exe="$OUTDIR/$name"
 compstatus_file="$src.compstatus"
+compstderr_file="$src.compstderr"
 
 expected_status=0
 if [ -f "$compstatus_file" ]; then
@@ -40,13 +47,21 @@ fi
 mkdir -p "$OUTDIR"
 rm -f "$exe"
 
-"$MGCC" -o "$exe" "$src" "$@" >"$exe.log" 2>&1
+"$MGCC" -o "$exe" "$src" "$@" >"$exe.out" 2>"$exe.err"
 actual_status=$?
 
 if [ "$actual_status" -ne "$expected_status" ]; then
     echo "FAIL   $src (compiler exit $actual_status, expected $expected_status)"
-    cat "$exe.log"
+    cat "$exe.err"
     exit 1
+fi
+
+if [ -f "$compstderr_file" ]; then
+    if ! diff -q "$compstderr_file" "$exe.err" >/dev/null; then
+        echo "FAIL   $src (compiler stderr does not match $compstderr_file)"
+        diff "$compstderr_file" "$exe.err" || true
+        exit 1
+    fi
 fi
 
 if [ "$expected_status" -ne 0 ]; then
@@ -56,7 +71,7 @@ fi
 
 if [ ! -f "$exe" ]; then
     echo "FAIL   $src (compiler succeeded but no executable produced)"
-    cat "$exe.log"
+    cat "$exe.err"
     exit 1
 fi
 
